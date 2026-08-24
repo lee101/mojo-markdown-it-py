@@ -1,9 +1,9 @@
-from std.algorithm import parallelize
+from std.algorithm import map
 from std.sys import simd_width_of as simdwidthof
 
 
-comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
+comptime BPtr = Pointer[UInt8, AnyOrigin[mut=True]]
+comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 
 
 def _special_mask[W: Int](value: SIMD[DType.uint8, W]) -> SIMD[DType.bool, W]:
@@ -26,7 +26,7 @@ def _escaped_size(src: BPtr, start: Int, end: Int) -> Int:
     var size = end - start
     var i = start
     while i + W <= end:
-        var value = src.load[width=W](i)
+        var value = src.unsafe_load[width=W](i)
         size += 4 * Int(value.eq(UInt8(38)).cast[DType.int64]().reduce_add())
         size += 3 * Int(
             (
@@ -37,7 +37,7 @@ def _escaped_size(src: BPtr, start: Int, end: Int) -> Int:
         size += 5 * Int(value.eq(UInt8(34)).cast[DType.int64]().reduce_add())
         i += W
     while i < end:
-        var value = src.load(i)
+        var value = src.unsafe_load(i)
         if value == UInt8(38):
             size += 4
         elif value == UInt8(60) or value == UInt8(62):
@@ -59,7 +59,7 @@ def _escape_range(
     var i = start
     var j = dst_start
     while i + W <= end:
-        var value = src.load[width=W](i)
+        var value = src.unsafe_load[width=W](i)
         var special = (
             value.eq(UInt8(38))
             | value.eq(UInt8(60))
@@ -67,74 +67,74 @@ def _escape_range(
             | value.eq(UInt8(34))
         )
         if not special:
-            dst.store(j, value)
+            dst.unsafe_store(j, value)
             i += W
             j += W
             continue
         for lane in range(W):
             var c = value[lane]
             if c == UInt8(38):
-                dst.store(j, UInt8(38))
-                dst.store(j + 1, UInt8(97))
-                dst.store(j + 2, UInt8(109))
-                dst.store(j + 3, UInt8(112))
-                dst.store(j + 4, UInt8(59))
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(97))
+                dst.unsafe_store(j + 2, UInt8(109))
+                dst.unsafe_store(j + 3, UInt8(112))
+                dst.unsafe_store(j + 4, UInt8(59))
                 j += 5
             elif c == UInt8(60):
-                dst.store(j, UInt8(38))
-                dst.store(j + 1, UInt8(108))
-                dst.store(j + 2, UInt8(116))
-                dst.store(j + 3, UInt8(59))
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(108))
+                dst.unsafe_store(j + 2, UInt8(116))
+                dst.unsafe_store(j + 3, UInt8(59))
                 j += 4
             elif c == UInt8(62):
-                dst.store(j, UInt8(38))
-                dst.store(j + 1, UInt8(103))
-                dst.store(j + 2, UInt8(116))
-                dst.store(j + 3, UInt8(59))
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(103))
+                dst.unsafe_store(j + 2, UInt8(116))
+                dst.unsafe_store(j + 3, UInt8(59))
                 j += 4
             elif c == UInt8(34):
-                dst.store(j, UInt8(38))
-                dst.store(j + 1, UInt8(113))
-                dst.store(j + 2, UInt8(117))
-                dst.store(j + 3, UInt8(111))
-                dst.store(j + 4, UInt8(116))
-                dst.store(j + 5, UInt8(59))
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(113))
+                dst.unsafe_store(j + 2, UInt8(117))
+                dst.unsafe_store(j + 3, UInt8(111))
+                dst.unsafe_store(j + 4, UInt8(116))
+                dst.unsafe_store(j + 5, UInt8(59))
                 j += 6
             else:
-                dst.store(j, c)
+                dst.unsafe_store(j, c)
                 j += 1
         i += W
     while i < end:
-        var c = src.load(i)
+        var c = src.unsafe_load(i)
         if c == UInt8(38):
-            dst.store(j, UInt8(38))
-            dst.store(j + 1, UInt8(97))
-            dst.store(j + 2, UInt8(109))
-            dst.store(j + 3, UInt8(112))
-            dst.store(j + 4, UInt8(59))
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(97))
+            dst.unsafe_store(j + 2, UInt8(109))
+            dst.unsafe_store(j + 3, UInt8(112))
+            dst.unsafe_store(j + 4, UInt8(59))
             j += 5
         elif c == UInt8(60):
-            dst.store(j, UInt8(38))
-            dst.store(j + 1, UInt8(108))
-            dst.store(j + 2, UInt8(116))
-            dst.store(j + 3, UInt8(59))
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(108))
+            dst.unsafe_store(j + 2, UInt8(116))
+            dst.unsafe_store(j + 3, UInt8(59))
             j += 4
         elif c == UInt8(62):
-            dst.store(j, UInt8(38))
-            dst.store(j + 1, UInt8(103))
-            dst.store(j + 2, UInt8(116))
-            dst.store(j + 3, UInt8(59))
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(103))
+            dst.unsafe_store(j + 2, UInt8(116))
+            dst.unsafe_store(j + 3, UInt8(59))
             j += 4
         elif c == UInt8(34):
-            dst.store(j, UInt8(38))
-            dst.store(j + 1, UInt8(113))
-            dst.store(j + 2, UInt8(117))
-            dst.store(j + 3, UInt8(111))
-            dst.store(j + 4, UInt8(116))
-            dst.store(j + 5, UInt8(59))
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(113))
+            dst.unsafe_store(j + 2, UInt8(117))
+            dst.unsafe_store(j + 3, UInt8(111))
+            dst.unsafe_store(j + 4, UInt8(116))
+            dst.unsafe_store(j + 5, UInt8(59))
             j += 6
         else:
-            dst.store(j, c)
+            dst.unsafe_store(j, c)
             j += 1
         i += 1
     return j
@@ -170,29 +170,29 @@ def mmi_scan_lines(
         var line_start = pos
         comptime W = simdwidthof[DType.float64]()
         while pos + W <= n:
-            var value = src.load[width=W](pos)
+            var value = src.unsafe_load[width=W](pos)
             if value.eq(UInt8(10)):
                 break
             pos += W
-        while pos < n and src.load(pos) != UInt8(10):
+        while pos < n and src.unsafe_load(pos) != UInt8(10):
             pos += 1
         var line_end = pos
-        if line_end > line_start and src.load(line_end - 1) == UInt8(13):
+        if line_end > line_start and src.unsafe_load(line_end - 1) == UInt8(13):
             line_end -= 1
         var content = line_start
         while content + W <= line_end:
-            var value = src.load[width=W](content)
+            var value = src.unsafe_load[width=W](content)
             if not (value.eq(UInt8(32)) | value.eq(UInt8(9))).reduce_and():
                 break
             content += W
         while content < line_end:
-            var c = src.load(content)
+            var c = src.unsafe_load(content)
             if c != UInt8(32) and c != UInt8(9):
                 break
             content += 1
-        starts.store(count, Int64(line_start))
-        ends.store(count, Int64(line_end))
-        first.store(count, Int64(content))
+        starts.unsafe_store(count, Int64(line_start))
+        ends.unsafe_store(count, Int64(line_end))
+        first.unsafe_store(count, Int64(content))
         count += 1
         if pos < n:
             pos += 1
@@ -214,7 +214,7 @@ def mmi_scan_specials(
     comptime W = simdwidthof[DType.float64]()
     var i = 0
     while i + W <= n:
-        var value = src.load[width=W](i)
+        var value = src.unsafe_load[width=W](i)
         if _special_mask(value):
             for lane in range(W):
                 var c = value[lane]
@@ -232,11 +232,11 @@ def mmi_scan_specials(
                 ):
                     if count >= capacity:
                         return -1
-                    positions.store(count, Int64(i + lane))
+                    positions.unsafe_store(count, Int64(i + lane))
                     count += 1
         i += W
     while i < n:
-        var c = src.load(i)
+        var c = src.unsafe_load(i)
         if (
             c == UInt8(10)
             or c == UInt8(13)
@@ -251,7 +251,7 @@ def mmi_scan_specials(
         ):
             if count >= capacity:
                 return -1
-            positions.store(count, Int64(i))
+            positions.unsafe_store(count, Int64(i))
             count += 1
         i += 1
     return count
@@ -285,19 +285,19 @@ def mmi_escape_html_offsets(
         return -1
     var src = BPtr(unsafe_from_address=src_addr)
     var offsets = IPtr(unsafe_from_address=offsets_addr)
-    offsets.store(0, Int64(0))
+    offsets.unsafe_store(0, Int64(0))
 
-    @parameter
+    @__parameter
     def count_chunk(chunk: Int):
         var start = chunk * chunk_size
         var end = min(start + chunk_size, n)
-        offsets.store(chunk + 1, Int64(_escaped_size(src, start, end)))
+        offsets.unsafe_store(chunk + 1, Int64(_escaped_size(src, start, end)))
 
-    parallelize[count_chunk](chunks, min(chunks, 4))
+    map[count_chunk](chunks)
     var total = 0
     for chunk in range(chunks):
-        total += Int(offsets.load(chunk + 1))
-        offsets.store(chunk + 1, Int64(total))
+        total += Int(offsets.unsafe_load(chunk + 1))
+        offsets.unsafe_store(chunk + 1, Int64(total))
     return total
 
 
@@ -326,16 +326,16 @@ def mmi_escape_html_chunks(
     var src = BPtr(unsafe_from_address=src_addr)
     var dst = BPtr(unsafe_from_address=dst_addr)
     var offsets = IPtr(unsafe_from_address=offsets_addr)
-    if Int(offsets.load(0)) != 0:
+    if Int(offsets.unsafe_load(0)) != 0:
         return -1
     var previous = 0
     for chunk in range(chunks):
-        var current = Int(offsets.load(chunk + 1))
+        var current = Int(offsets.unsafe_load(chunk + 1))
         if current < previous or current > dst_capacity:
             return -1
         previous = current
 
-    @parameter
+    @__parameter
     def escape_chunk(chunk: Int):
         var start = chunk * chunk_size
         var end = min(start + chunk_size, n)
@@ -344,11 +344,11 @@ def mmi_escape_html_chunks(
             start,
             end,
             dst,
-            Int(offsets.load(chunk)),
+            Int(offsets.unsafe_load(chunk)),
         )
 
-    parallelize[escape_chunk](chunks, min(chunks, 4))
-    return Int(offsets.load(chunks))
+    map[escape_chunk](chunks)
+    return Int(offsets.unsafe_load(chunks))
 
 
 @export("mmi_escape_html")
