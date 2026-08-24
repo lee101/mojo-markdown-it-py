@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,8 +16,9 @@ LIB_PATH = os.environ.get(
 )
 I = ctypes.c_int64
 _SMALL_ESCAPE_THRESHOLD = 4_096
-_PARALLEL_ESCAPE_THRESHOLD = 8_388_608
-_ESCAPE_CHUNK_SIZE = 65_536
+_PARALLEL_ESCAPE_THRESHOLD = 4_194_304
+_ESCAPE_CHUNK_SIZE = 1_048_576
+_ESCAPE_WORKERS = 8
 
 _py_bytes_as_string = ctypes.pythonapi.PyBytes_AsString
 _py_bytes_as_string.argtypes = [ctypes.py_object]
@@ -49,6 +51,8 @@ def lib() -> ctypes.CDLL:
         _library.mmi_scan_specials.restype = I
         _library.mmi_escape_html.argtypes = [I, I, I, I]
         _library.mmi_escape_html.restype = I
+        _library.mmi_escape_html_write.argtypes = [I, I, I, I]
+        _library.mmi_escape_html_write.restype = I
         _library.mmi_escape_html_size.argtypes = [I, I]
         _library.mmi_escape_html_size.restype = I
         _library.mmi_escape_html_offsets.argtypes = [I, I, I, I, I]
@@ -89,27 +93,16 @@ class Line:
 
 
 def scan_lines(text: str) -> list[Line]:
-    data = text.encode("utf-8")
-    if not data:
+    if not text:
         return []
-    capacity = data.count(b"\n") + 1
-    starts = np.empty(capacity, dtype=np.int64)
-    ends = np.empty(capacity, dtype=np.int64)
-    first = np.empty(capacity, dtype=np.int64)
-    count = lib().mmi_scan_lines(
-        _bytes_address(data),
-        len(data),
-        starts.ctypes.data,
-        ends.ctypes.data,
-        first.ctypes.data,
-        capacity,
-    )
-    count = _checked_count("line scanner", count, capacity)
+    parts = text.split("\n")
+    if parts[-1] == "":
+        parts.pop()
     result: list[Line] = []
-    for i in range(count):
-        start, end = int(starts[i]), int(ends[i])
-        raw = data[start:end]
-        result.append(Line(raw.decode("utf-8"), i, int(first[i]) - start))
+    for number, line in enumerate(parts):
+        if line.endswith("\r"):
+            line = line[:-1]
+        result.append(Line(line, number, len(line) - len(line.lstrip(" \t"))))
     return result
 
 
@@ -149,30 +142,47 @@ def escape_html(text: str, *, parallel: bool | None = None) -> str:
     use_parallel = _should_parallel_escape(len(data), parallel)
     if use_parallel:
         chunks = (len(data) + _ESCAPE_CHUNK_SIZE - 1) // _ESCAPE_CHUNK_SIZE
+        workers = min(chunks, _ESCAPE_WORKERS)
+
+        def chunk_bounds(chunk: int) -> tuple[int, int]:
+            start = chunk * _ESCAPE_CHUNK_SIZE
+            return start, min(start + _ESCAPE_CHUNK_SIZE, len(data))
+
+        def size_chunk(chunk: int) -> int:
+            start, end = chunk_bounds(chunk)
+            return _checked_size(
+                "parallel HTML escape sizing",
+                library.mmi_escape_html_size(source_addr + start, end - start),
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            sizes = list(executor.map(size_chunk, range(chunks)))
         offsets = np.empty(chunks + 1, dtype=np.int64)
-        size = library.mmi_escape_html_offsets(
-            source_addr,
-            len(data),
-            offsets.ctypes.data,
-            _ESCAPE_CHUNK_SIZE,
-            len(offsets),
-        )
-        size = _checked_size("parallel HTML escape sizing", size)
+        offsets[0] = 0
+        np.cumsum(sizes, out=offsets[1:])
+        size = int(offsets[-1])
         target = ctypes.create_string_buffer(size)
-        written = library.mmi_escape_html_chunks(
-            source_addr,
-            len(data),
-            ctypes.addressof(target),
-            offsets.ctypes.data,
-            _ESCAPE_CHUNK_SIZE,
-            len(offsets),
-            size,
-        )
+        target_addr = ctypes.addressof(target)
+
+        def write_chunk(chunk: int) -> int:
+            start, end = chunk_bounds(chunk)
+            return library.mmi_escape_html_write(
+                source_addr + start,
+                end - start,
+                target_addr + int(offsets[chunk]),
+                sizes[chunk],
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            written_chunks = list(executor.map(write_chunk, range(chunks)))
+        if written_chunks != sizes:
+            raise LibraryError("parallel HTML escape wrote an unexpected chunk size")
+        written = size
     else:
         size = library.mmi_escape_html_size(source_addr, len(data))
         size = _checked_size("HTML escape sizing", size)
         target = ctypes.create_string_buffer(size)
-        written = library.mmi_escape_html(
+        written = library.mmi_escape_html_write(
             source_addr,
             len(data),
             ctypes.addressof(target),

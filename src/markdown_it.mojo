@@ -23,19 +23,22 @@ def _special_mask[W: Int](value: SIMD[DType.uint8, W]) -> SIMD[DType.bool, W]:
 
 def _escaped_size(src: BPtr, start: Int, end: Int) -> Int:
     comptime W = simdwidthof[DType.float64]()
+    comptime BYTE_W = W * 8
     var size = end - start
     var i = start
-    while i + W <= end:
-        var value = src.unsafe_load[width=W](i)
-        size += 4 * Int(value.eq(UInt8(38)).cast[DType.int64]().reduce_add())
-        size += 3 * Int(
-            (
-                value.eq(UInt8(60)).cast[DType.int64]()
-                + value.eq(UInt8(62)).cast[DType.int64]()
-            ).reduce_add()
+    while i + BYTE_W <= end:
+        var value = src.unsafe_load[width=BYTE_W, alignment=1](i)
+        var extra = value.eq(UInt8(38)).select(
+            SIMD[DType.uint8, BYTE_W](4), SIMD[DType.uint8, BYTE_W](0)
         )
-        size += 5 * Int(value.eq(UInt8(34)).cast[DType.int64]().reduce_add())
-        i += W
+        extra += (value.eq(UInt8(60)) | value.eq(UInt8(62))).select(
+            SIMD[DType.uint8, BYTE_W](3), SIMD[DType.uint8, BYTE_W](0)
+        )
+        extra += value.eq(UInt8(34)).select(
+            SIMD[DType.uint8, BYTE_W](5), SIMD[DType.uint8, BYTE_W](0)
+        )
+        size += Int(extra.cast[DType.int16]().reduce_add())
+        i += BYTE_W
     while i < end:
         var value = src.unsafe_load(i)
         if value == UInt8(38):
@@ -59,7 +62,7 @@ def _escape_range(
     var i = start
     var j = dst_start
     while i + W <= end:
-        var value = src.unsafe_load[width=W](i)
+        var value = src.unsafe_load[width=W, alignment=1](i)
         var special = (
             value.eq(UInt8(38))
             | value.eq(UInt8(60))
@@ -67,7 +70,7 @@ def _escape_range(
             | value.eq(UInt8(34))
         )
         if not special:
-            dst.unsafe_store(j, value)
+            dst.unsafe_store[alignment=1](j, value)
             i += W
             j += W
             continue
@@ -349,6 +352,17 @@ def mmi_escape_html_chunks(
 
     map[escape_chunk](chunks)
     return Int(offsets.unsafe_load(chunks))
+
+
+@export("mmi_escape_html_write")
+def mmi_escape_html_write(
+    src_addr: Int, n: Int, dst_addr: Int, dst_capacity: Int
+) abi("C") -> Int:
+    if src_addr == 0 or dst_addr == 0 or n < 0 or dst_capacity < n:
+        return -1
+    var src = BPtr(unsafe_from_address=src_addr)
+    var dst = BPtr(unsafe_from_address=dst_addr)
+    return _escape_range(src, 0, n, dst, 0)
 
 
 @export("mmi_escape_html")

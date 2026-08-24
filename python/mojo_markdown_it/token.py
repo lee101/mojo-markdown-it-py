@@ -5,15 +5,6 @@ import warnings
 from collections.abc import Callable, MutableMapping
 from typing import Any, Literal
 
-
-def _attrs(value):
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    return dict(value)
-
-
 @dc.dataclass(slots=True)
 class Token:
     type: str
@@ -31,7 +22,10 @@ class Token:
     hidden: bool = False
 
     def __post_init__(self) -> None:
-        self.attrs = _attrs(self.attrs)
+        if self.attrs is None:
+            self.attrs = {}
+        elif not isinstance(self.attrs, dict):
+            self.attrs = dict(self.attrs)
 
     def attrIndex(self, name: str) -> int:
         warnings.warn(

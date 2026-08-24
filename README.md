@@ -66,18 +66,18 @@ pixi run python -c 'from mojo_markdown_it import MarkdownIt; print(MarkdownIt().
 
 ## Benchmark
 
-Measured on 2026-07-30 on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux x86-64,
+Measured on 2026-08-24 on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux x86-64,
 using the pinned Mojo nightly and `markdown-it-py` 4.2.0. Times are the best of
 five warm runs from `pixi run bench`; rendered-output equality is asserted before
 timing.
 
 | Operation | Input | Mojo port | markdown-it-py | Relative |
 |---|---:|---:|---:|---:|
-| HTML escape | 4.6 MB | 45.48 ms | 59.32 ms | 1.30x faster |
-| parse plain blocks | 1.0 MB | 242.64 ms | 399.11 ms | 1.64x faster |
-| render plain blocks | 1.0 MB | 232.42 ms | 491.44 ms | 2.11x faster |
-| parse mixed CommonMark | 0.5 MB | 748.74 ms | 897.68 ms | 1.20x faster |
-| render mixed CommonMark | 0.5 MB | 949.91 ms | 1043.97 ms | 1.10x faster |
+| HTML escape | 4.6 MB | 20.77 ms | 39.05 ms | 1.88x faster |
+| parse plain blocks | 1.0 MB | 175.57 ms | 376.49 ms | 2.14x faster |
+| render plain blocks | 1.0 MB | 208.05 ms | 404.90 ms | 1.95x faster |
+| parse mixed CommonMark | 0.5 MB | 635.81 ms | 863.31 ms | 1.36x faster |
+| render mixed CommonMark | 0.5 MB | 641.12 ms | 809.29 ms | 1.26x faster |
 
 The port was faster in all five cases on this run. The host is shared
 with unrelated production workloads, so absolute times vary even though the
@@ -91,17 +91,17 @@ Large CPU escaping uses a bounded worker pool above its parallelism threshold.
 ## How it works
 
 `src/markdown_it.mojo` is one compilation unit exporting its scanning and escaping
-C ABI functions.
-Python passes UTF-8 input and output buffers as integer addresses. Mojo reconstructs
-`UnsafePointer` values with `AnyOrigin[mut=True]`, scans line boundaries and inline
-special bytes into contiguous `int64` arrays, and escapes HTML into a caller-owned
-byte buffer. Mojo performs no allocation across the ABI.
+C ABI functions. Python passes UTF-8 input and output buffers as integer addresses.
+Mojo reconstructs `UnsafePointer` values with `AnyOrigin[mut=True]`, scans bytes with
+SIMD, and escapes HTML into a caller-owned byte buffer. Mojo performs no allocation
+across the ABI.
 
 The ctypes layer passes Python `bytes` storage into Mojo without a source copy,
 allocates the exact escaped output size, and decodes directly from the destination
-buffer. The Mojo loops use SIMD with scalar remainder handling. Large escapes are
-counted and written in independent chunks; smaller inputs stay
-serial to avoid thread-launch overhead. Python turns line spans into block tokens,
+buffer. The Mojo loops use full-register byte SIMD with scalar remainder handling.
+Large escapes are counted and written in independent 1 MiB chunks by a bounded
+worker pool; inputs below 4 MiB stay serial to avoid thread-launch overhead. The
+parser splits Unicode lines directly, avoiding an encode/scan/decode round trip,
 assembles inline token trees, and keeps plugin-visible objects as ordinary Python
 `Token` instances.
 

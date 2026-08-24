@@ -62,6 +62,14 @@ def test_serial_simd_escape_handles_utf8_and_tail():
     assert escape_html(source, parallel=False) == upstream_escape_html(source)
 
 
+def test_simd_escape_size_handles_every_short_tail():
+    library = lib()
+    for length in range(1, 80):
+        source = (b'ab<&>"' * 14)[:length]
+        expected = len(upstream_escape_html(source.decode()).encode())
+        assert library.mmi_escape_html_size(_bytes_address(source), length) == expected
+
+
 def test_parallel_escape_threshold_and_output():
     assert not _should_parallel_escape(_PARALLEL_ESCAPE_THRESHOLD - 1, None)
     assert _should_parallel_escape(_PARALLEL_ESCAPE_THRESHOLD, None)

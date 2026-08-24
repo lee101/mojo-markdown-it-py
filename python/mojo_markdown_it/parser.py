@@ -218,6 +218,11 @@ def parse_inline(source: str, env: dict, options, rules: set[str] | None = None)
 
     i = 0
     while i < len(source):
+        special = _INLINE_SPECIAL.search(source, i)
+        if special and special.start() > i:
+            buf.append(source[i : special.start()])
+            i = special.start()
+            continue
         ch = source[i]
         if ch == "\\" and "escape" in enabled:
             if i + 1 < len(source) and source[i + 1] == "\n":
@@ -231,9 +236,14 @@ def parse_inline(source: str, env: dict, options, rules: set[str] | None = None)
                 continue
         if ch == "\n" and "newline" in enabled:
             trailing = 0
-            while buf and buf[-1] == " ":
+            while buf:
+                tail = buf[-1]
+                stripped = tail.rstrip(" ")
+                trailing += len(tail) - len(stripped)
+                if stripped:
+                    buf[-1] = stripped
+                    break
                 buf.pop()
-                trailing += 1
             flush()
             tokens.append(_token("hardbreak" if trailing >= 2 else "softbreak", "br"))
             i += 1
@@ -325,11 +335,10 @@ def parse_inline(source: str, env: dict, options, rules: set[str] | None = None)
                     i = end
                     continue
         if ch == "<":
-            part = source[i:]
-            match = _AUTOLINK.match(part) if "autolink" in enabled else None
+            match = _AUTOLINK.match(source, i) if "autolink" in enabled else None
             if match and not _validate_url(match.group(1)):
                 match = None
-            email = _EMAIL.match(part) if "autolink" in enabled and not match else None
+            email = _EMAIL.match(source, i) if "autolink" in enabled and not match else None
             if match or email:
                 flush()
                 shown = (match or email).group(1)
@@ -342,13 +351,13 @@ def parse_inline(source: str, env: dict, options, rules: set[str] | None = None)
                 tokens.append(
                     _token("link_close", "a", -1, markup="autolink", info="auto")
                 )
-                i += (match or email).end()
+                i = (match or email).end()
                 continue
-            match = _HTML_INLINE.match(part) if options["html"] and "html_inline" in enabled else None
+            match = _HTML_INLINE.match(source, i) if options["html"] and "html_inline" in enabled else None
             if match:
                 flush()
                 tokens.append(_token("html_inline", content=match.group(0)))
-                i += match.end()
+                i = match.end()
                 continue
         if ch == "&" and "entity" in enabled:
             match = _ENTITY.match(source, i)
