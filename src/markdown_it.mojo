@@ -1,4 +1,3 @@
-from std.algorithm import map
 from std.sys import simd_width_of as simdwidthof
 
 
@@ -290,13 +289,11 @@ def mmi_escape_html_offsets(
     var offsets = IPtr(unsafe_from_address=offsets_addr)
     offsets.unsafe_store(0, Int64(0))
 
-    @__parameter
-    def count_chunk(chunk: Int):
+    for chunk in range(chunks):
         var start = chunk * chunk_size
         var end = min(start + chunk_size, n)
         offsets.unsafe_store(chunk + 1, Int64(_escaped_size(src, start, end)))
 
-    map[count_chunk](chunks)
     var total = 0
     for chunk in range(chunks):
         total += Int(offsets.unsafe_load(chunk + 1))
@@ -338,8 +335,7 @@ def mmi_escape_html_chunks(
             return -1
         previous = current
 
-    @__parameter
-    def escape_chunk(chunk: Int):
+    for chunk in range(chunks):
         var start = chunk * chunk_size
         var end = min(start + chunk_size, n)
         _ = _escape_range(
@@ -350,7 +346,6 @@ def mmi_escape_html_chunks(
             Int(offsets.unsafe_load(chunk)),
         )
 
-    map[escape_chunk](chunks)
     return Int(offsets.unsafe_load(chunks))
 
 

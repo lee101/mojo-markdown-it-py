@@ -104,3 +104,32 @@ def test_native_parallel_boundary_rejects_invalid_metadata():
     assert library.mmi_escape_html_chunks(
         address, 4, ctypes.addressof(target), offsets.ctypes.data, 4, 2, 16
     ) == -1
+
+
+def test_chunked_escape_offsets_and_write_match_the_serial_kernel():
+    library = lib()
+    source = ('ab<&>"café<&>' * 97) + "<tail<&>"
+    data = source.encode()
+    expected = upstream_escape_html(source).encode()
+    for chunk_size in (1, 3, 5, 16, 64, len(data) - 1, len(data)):
+        chunks = (len(data) + chunk_size - 1) // chunk_size
+        offsets = np.zeros(chunks + 1, dtype=np.int64)
+        total = library.mmi_escape_html_offsets(
+            _bytes_address(data), len(data), offsets.ctypes.data, chunk_size, chunks + 1
+        )
+        assert total == len(expected)
+        # Offsets are a non-decreasing prefix sum bounded by the escape total.
+        assert offsets[0] == 0
+        assert np.all(np.diff(offsets) >= 0)
+        assert offsets[-1] == len(expected)
+        target = ctypes.create_string_buffer(total)
+        assert library.mmi_escape_html_chunks(
+            _bytes_address(data),
+            len(data),
+            ctypes.addressof(target),
+            offsets.ctypes.data,
+            chunk_size,
+            chunks + 1,
+            total,
+        ) == total
+        assert target.raw[:total] == expected
