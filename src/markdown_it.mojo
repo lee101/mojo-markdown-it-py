@@ -106,6 +106,22 @@ def _escape_range(
                 dst.unsafe_store(j, c)
                 j += 1
         i += W
+        # While the next block is entirely clean, copy it and check the one after.
+        # Mixed input then pays the scalar lane loop once per special block rather
+        # than once per special character, and keeps plain runs at vector speed.
+        while i + 2 * W <= end:
+            var peek = src.unsafe_load[width=W, alignment=1](i)
+            var peek_special = (
+                peek.eq(UInt8(38))
+                | peek.eq(UInt8(60))
+                | peek.eq(UInt8(62))
+                | peek.eq(UInt8(34))
+            )
+            if peek_special:
+                break
+            dst.unsafe_store[alignment=1](j, peek)
+            i += W
+            j += W
     while i < end:
         var c = src.unsafe_load(i)
         if c == UInt8(38):
@@ -357,7 +373,89 @@ def mmi_escape_html_write(
         return -1
     var src = BPtr(unsafe_from_address=src_addr)
     var dst = BPtr(unsafe_from_address=dst_addr)
-    return _escape_range(src, 0, n, dst, 0)
+    comptime W = simdwidthof[DType.float64]()
+    var i = 0
+    var j = 0
+    while i + W <= n:
+        var value = src.unsafe_load[width=W, alignment=1](i)
+        var special = (
+            value.eq(UInt8(38))
+            | value.eq(UInt8(60))
+            | value.eq(UInt8(62))
+            | value.eq(UInt8(34))
+        )
+        if not special:
+            dst.unsafe_store[alignment=1](j, value)
+            i += W
+            j += W
+            continue
+        for lane in range(W):
+            var c = value[lane]
+            if c == UInt8(38):
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(97))
+                dst.unsafe_store(j + 2, UInt8(109))
+                dst.unsafe_store(j + 3, UInt8(112))
+                dst.unsafe_store(j + 4, UInt8(59))
+                j += 5
+            elif c == UInt8(60):
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(108))
+                dst.unsafe_store(j + 2, UInt8(116))
+                dst.unsafe_store(j + 3, UInt8(59))
+                j += 4
+            elif c == UInt8(62):
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(103))
+                dst.unsafe_store(j + 2, UInt8(116))
+                dst.unsafe_store(j + 3, UInt8(59))
+                j += 4
+            elif c == UInt8(34):
+                dst.unsafe_store(j, UInt8(38))
+                dst.unsafe_store(j + 1, UInt8(113))
+                dst.unsafe_store(j + 2, UInt8(117))
+                dst.unsafe_store(j + 3, UInt8(111))
+                dst.unsafe_store(j + 4, UInt8(116))
+                dst.unsafe_store(j + 5, UInt8(59))
+                j += 6
+            else:
+                dst.unsafe_store(j, c)
+                j += 1
+        i += W
+    while i < n:
+        var c = src.unsafe_load(i)
+        if c == UInt8(38):
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(97))
+            dst.unsafe_store(j + 2, UInt8(109))
+            dst.unsafe_store(j + 3, UInt8(112))
+            dst.unsafe_store(j + 4, UInt8(59))
+            j += 5
+        elif c == UInt8(60):
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(108))
+            dst.unsafe_store(j + 2, UInt8(116))
+            dst.unsafe_store(j + 3, UInt8(59))
+            j += 4
+        elif c == UInt8(62):
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(103))
+            dst.unsafe_store(j + 2, UInt8(116))
+            dst.unsafe_store(j + 3, UInt8(59))
+            j += 4
+        elif c == UInt8(34):
+            dst.unsafe_store(j, UInt8(38))
+            dst.unsafe_store(j + 1, UInt8(113))
+            dst.unsafe_store(j + 2, UInt8(117))
+            dst.unsafe_store(j + 3, UInt8(111))
+            dst.unsafe_store(j + 4, UInt8(116))
+            dst.unsafe_store(j + 5, UInt8(59))
+            j += 6
+        else:
+            dst.unsafe_store(j, c)
+            j += 1
+        i += 1
+    return j
 
 
 @export("mmi_escape_html")

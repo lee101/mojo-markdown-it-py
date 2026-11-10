@@ -66,27 +66,61 @@ pixi run python -c 'from mojo_markdown_it import MarkdownIt; print(MarkdownIt().
 
 ## Benchmark
 
-Measured on 2026-08-24 on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux x86-64,
+Measured on 2026-11-10 on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux x86-64,
 using the pinned Mojo nightly and `markdown-it-py` 4.2.0. Times are the best of
 five warm runs from `pixi run bench`; rendered-output equality is asserted before
-timing.
+timing. The host is shared, so absolute times vary between runs (regenerate with
+`pixi run bench` rather than comparing across dates).
 
 | Operation | Input | Mojo port | markdown-it-py | Relative |
 |---|---:|---:|---:|---:|
-| HTML escape | 4.6 MB | 20.77 ms | 39.05 ms | 1.88x faster |
-| parse plain blocks | 1.0 MB | 175.57 ms | 376.49 ms | 2.14x faster |
-| render plain blocks | 1.0 MB | 208.05 ms | 404.90 ms | 1.95x faster |
-| parse mixed CommonMark | 0.5 MB | 635.81 ms | 863.31 ms | 1.36x faster |
-| render mixed CommonMark | 0.5 MB | 641.12 ms | 809.29 ms | 1.26x faster |
+| HTML escape | 4.6 MB | 21.80 ms | 39.15 ms | 1.80x faster |
+| parse plain blocks | 1.0 MB | 172.33 ms | 366.35 ms | 2.13x faster |
+| render plain blocks | 1.0 MB | 197.03 ms | 413.04 ms | 2.10x faster |
+| parse mixed CommonMark | 0.5 MB | 650.52 ms | 875.94 ms | 1.35x faster |
+| render mixed CommonMark | 0.5 MB | 603.12 ms | 812.59 ms | 1.35x faster |
 
-The port was faster in all five cases on this run. The host is shared
-with unrelated production workloads, so absolute times vary even though the
-machine-wide benchmark lock prevents overlapping factory benchmark jobs.
+### SIMD pass: HTML escaping
 
-GPU acceleration is intentionally omitted. These kernels scan bytes, compare
-characters, and perform variable-length copies; they do no floating-point work and
-have too little arithmetic intensity to recover device-transfer and launch costs.
-Large CPU escaping uses a bounded worker pool above its parallelism threshold.
+The escape kernels scan every byte twice: a 32-byte-wide sizing pass, then a
+16-byte-wide write pass whose scalar lane fallback ran once per special
+character. Because every 32-byte block of the benchmark's escape input holds a
+special, nearly all of its time went to per-lane scalar stores. Two changes
+address that:
+
+- **Fused size and write in the serial writer.** `mmi_escape_html_write` now runs
+  a single pass that keeps separate source and destination cursors, rather than
+  indexing the destination by the source offset until the first special.
+- **Copy-while-clean in the range helper.** After a block that carries a
+  special, the code checks and copies the following block, so clean runs after
+  specials stay vectorised and the lane loop runs once per special block instead
+  of once per special byte. This also covers the chunked parallel path.
+
+Measured on 2026-11-10 on the same host, calling `mmi_escape_html_write`
+directly on a 4.64 MB buffer with `time.perf_counter`, best of 40 runs, in
+separate processes:
+
+| Buffer | Before | After |
+|---|---:|---:|
+| Mixed: `5 < 6 & "quoted" > 0; café. ` repeated, 24% of bytes special | 7.04-7.31 ms | 6.26-6.51 ms |
+| Plain: `abcdefgh` repeated, no specials | 1.71 ms | 1.67-1.70 ms (unchanged within noise) |
+
+The end-to-end `pixi run bench` HTML escape row stays at roughly 21.6-21.8 ms
+across four runs on this shared host, the same as before the change. Its thread
+pool overlaps the serial per-chunk work with encode and decode, so the kernel
+gain does not show up at the bench's size. The direct kernel timings above are
+the reliable measurement.
+
+Rejected after measuring, and reverted:
+
+- A clean-block early exit in the sizing pass: mixed sizing 490 us to 572 us.
+- A last-block 16-byte copy in the range helper: 7.29 ms to 7.18 ms, inside run-to-run noise.
+- An unconditional-lane special scanner: mixed scanning 1.15 ms to 1.69 ms.
+
+`bench/analysis.md` was not present in this checkout, and no file listing these
+loops was tracked in git history, so the kernels were selected from the loops
+the FFI actually exposes and confirmed with `pixi run bench` plus direct kernel
+timings.
 
 ## How it works
 
