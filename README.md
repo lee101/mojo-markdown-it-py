@@ -241,6 +241,60 @@ Not adopted, after measuring:
   measured 41.39 ms against 27.67 ms at 16 MiB, so it was reverted and the serial
   kernel is untouched.
 
+## GPU: CPU only: memory-bound
+
+There is no GPU path. Every kernel this port exports is a byte scan or a byte
+copy, and none of them reaches the gate of roughly 2 flops per byte, so the phase
+was closed at the gate rather than attempted.
+
+The gate was checked as follows:
+
+- **`bench/analysis.md` is not in this checkout, and git history contains no
+  commit that ever added it** (`git log --all -- bench/analysis.md` is empty).
+  It was checked: the gate was applied to the arithmetic intensity of the
+  kernels that actually exist, measured on this host.
+- **GPU availability:** `nvidia-smi --query-gpu=memory.free --format=csv,noheader`
+  reported `4557 MiB` free on an NVIDIA GeForce RTX 5090, above the 4000 MiB
+  floor. The device was available; the gate that stopped this was the flops per
+  byte, not memory.
+- **Allocation budget:** nothing was allocated, so the 2 GB cap is trivially
+  satisfied.
+
+### Arithmetic intensity
+
+Measured on 2026-11-10 on an Intel Xeon E5-2697 v4 at 2.30 GHz (shared host,
+Linux x86-64) from the callable C ABI, best of 20 runs cold-built once,
+4 MiB buffers, mixed input `5 < 6 & "quoted" > 0; café. ` repeated:
+
+| Kernel | Work per byte | Time | Effective bandwidth |
+|---|---|---:|---:|
+| `mmi_escape_html_size` | 4 byte compares + one lane select/add | 0.46 ms | 9.2 GB/s read |
+| `mmi_escape_html_write` | 4 byte compares, 1 byte in, 1-6 bytes out | 5.89 ms | 1.4 GB/s read+write |
+| `mmi_scan_lines` | 1 compare + space/tab skip per block | 1.71 ms | 2.5 GB/s read |
+
+In flops per byte, the first two are four comparisons per byte, so at most about
+**0.5 flops/byte**, and the input is already running at 9.2 GB/s on the CPU. Even
+the strongest kernel is an order of magnitude below the 2 flops/byte gate, so a
+GPU kernel would be a straight transport of the same bytes with no arithmetic to
+hide the transfer behind. The escape is also a variable-length scatter, the
+opposite of the uniform per-thread writes a GPU wants, and the parser's real cost
+is structural (line splitting, block state, inline token trees) and calls back
+into Python per token.
+
+Consequence, as measured for the parallel phase in the section above: this
+factor of the work is memory-bound, so it is kept on the CPU, where the existing
+SIMD kernels and `max.algorithm.parallelize` chunking already run at 1.4-9.2
+GB/s. A kernel would need real arithmetic per byte (no such kernel exists in
+CommonMark tokenizing or HTML escaping) before a GPU transfer could pay for
+itself.
+
+### GPU tests
+
+No GPU tests were added, because there is no GPU kernel to test. The existing
+suite covers the CPU kernels and the chunked parallel path, and runs unchanged on
+a host with no CUDA device. If a GPU path is added later, its tests must skip
+cleanly when no device is present; nothing in this checkout requires one.
+
 ## Development
 
 ```bash
