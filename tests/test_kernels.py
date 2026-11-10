@@ -8,6 +8,8 @@ import pytest
 from markdown_it.common.utils import escapeHtml as upstream_escape_html
 
 from mojo_markdown_it._lib import (
+    _ESCAPE_CHUNK_SIZE,
+    _ESCAPE_WORKERS,
     _PARALLEL_ESCAPE_THRESHOLD,
     _bytes_address,
     _should_parallel_escape,
@@ -100,9 +102,46 @@ def test_parallel_escape_threshold_and_output():
     assert not _should_parallel_escape(_PARALLEL_ESCAPE_THRESHOLD - 1, None)
     assert _should_parallel_escape(_PARALLEL_ESCAPE_THRESHOLD, None)
     assert not _should_parallel_escape(_PARALLEL_ESCAPE_THRESHOLD, False)
-    source = ('ab<&>"café' * 800_000) + "<tail"
+    source = ('ab<&>"café' * 1_300_000) + "<tail"
     assert len(source.encode()) >= _PARALLEL_ESCAPE_THRESHOLD
     assert escape_html(source, parallel=True) == upstream_escape_html(source)
+
+
+def test_parallel_escape_matches_serial_for_every_worker_count():
+    # Above the threshold the caller runs both passes in Mojo workers. The
+    # result must be byte-identical to the serial kernel, because each chunk
+    # owns a disjoint output range and an escape never spans a byte.
+    source = ('mix <b>&amp;</b> "q" café ' * 500_000) + "<>&\"tail"
+    data = source.encode()
+    assert len(data) >= _PARALLEL_ESCAPE_THRESHOLD
+    expected = upstream_escape_html(source).encode()
+    serial = escape_html(source, parallel=False)
+    assert serial == upstream_escape_html(source)
+    assert escape_html(source, parallel=True) == serial
+
+    library = lib()
+    address = _bytes_address(data)
+    needed = library.mmi_escape_html_size(address, len(data))
+    reference = ctypes.create_string_buffer(needed)
+    assert library.mmi_escape_html_write(
+        address, len(data), ctypes.addressof(reference), needed
+    ) == needed
+
+    chunks = (len(data) + _ESCAPE_CHUNK_SIZE - 1) // _ESCAPE_CHUNK_SIZE
+    for workers in (1, 2, 4, _ESCAPE_WORKERS):
+        offsets = np.zeros(chunks + 1, dtype=np.int64)
+        total = library.mmi_escape_html_offsets(
+            address, len(data), offsets.ctypes.data,
+            _ESCAPE_CHUNK_SIZE, chunks + 1, workers,
+        )
+        assert total == needed
+        assert offsets[-1] == needed
+        target = ctypes.create_string_buffer(total)
+        assert library.mmi_escape_html_chunks(
+            address, len(data), ctypes.addressof(target),
+            offsets.ctypes.data, _ESCAPE_CHUNK_SIZE, chunks + 1, total, workers,
+        ) == total
+        assert target.raw[:total] == reference.raw[:needed] == expected
 
 
 def test_native_boundary_rejects_null_negative_and_short_buffers():
@@ -123,12 +162,16 @@ def test_native_parallel_boundary_rejects_invalid_metadata():
     data = b"<value>"
     address = _bytes_address(data)
     offsets = np.zeros(2, dtype=np.int64)
-    assert library.mmi_escape_html_offsets(address, len(data), offsets.ctypes.data, 0, 2) == -1
-    assert library.mmi_escape_html_offsets(address, len(data), offsets.ctypes.data, 4, 2) == -1
+    assert library.mmi_escape_html_offsets(address, len(data), offsets.ctypes.data, 0, 2, 1) == -1
+    assert library.mmi_escape_html_offsets(address, len(data), offsets.ctypes.data, 4, 2, 1) == -1
+    assert library.mmi_escape_html_offsets(address, len(data), offsets.ctypes.data, 4, 2, -1) == -1
     offsets[:] = [0, 100]
     target = ctypes.create_string_buffer(16)
     assert library.mmi_escape_html_chunks(
-        address, 4, ctypes.addressof(target), offsets.ctypes.data, 4, 2, 16
+        address, 4, ctypes.addressof(target), offsets.ctypes.data, 4, 2, 16, 1
+    ) == -1
+    assert library.mmi_escape_html_chunks(
+        address, 4, ctypes.addressof(target), offsets.ctypes.data, 4, 2, 16, -1
     ) == -1
 
 
@@ -141,7 +184,7 @@ def test_chunked_escape_offsets_and_write_match_the_serial_kernel():
         chunks = (len(data) + chunk_size - 1) // chunk_size
         offsets = np.zeros(chunks + 1, dtype=np.int64)
         total = library.mmi_escape_html_offsets(
-            _bytes_address(data), len(data), offsets.ctypes.data, chunk_size, chunks + 1
+            _bytes_address(data), len(data), offsets.ctypes.data, chunk_size, chunks + 1, 1
         )
         assert total == len(expected)
         # Offsets are a non-decreasing prefix sum bounded by the escape total.
@@ -157,6 +200,7 @@ def test_chunked_escape_offsets_and_write_match_the_serial_kernel():
             chunk_size,
             chunks + 1,
             total,
+            1,
         ) == total
         assert target.raw[:total] == expected
 

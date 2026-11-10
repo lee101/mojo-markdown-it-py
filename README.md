@@ -133,11 +133,113 @@ across the ABI.
 The ctypes layer passes Python `bytes` storage into Mojo without a source copy,
 allocates the exact escaped output size, and decodes directly from the destination
 buffer. The Mojo loops use full-register byte SIMD with scalar remainder handling.
-Large escapes are counted and written in independent 1 MiB chunks by a bounded
-worker pool; inputs below 4 MiB stay serial to avoid thread-launch overhead. The
-parser splits Unicode lines directly, avoiding an encode/scan/decode round trip,
-assembles inline token trees, and keeps plugin-visible objects as ordinary Python
-`Token` instances.
+Large escapes are counted and written in independent 1 MiB chunks by
+`max.algorithm.parallelize` workers inside Mojo; inputs below 12 MiB stay serial,
+because measurement (below) shows worker launch costs more than the split saves
+there. The parser splits Unicode lines directly, avoiding an encode/scan/decode
+round trip, assembles inline token trees, and keeps plugin-visible objects as
+ordinary Python `Token` instances.
+
+## Parallelism
+
+The chunked HTML escape runs in Mojo. `mmi_escape_html_offsets` sizes each chunk
+and takes a serial prefix sum; `mmi_escape_html_chunks` then escapes each chunk
+into its own disjoint output range. Both passes dispatch through
+`from max.algorithm import parallelize` with an explicit worker count. `std.algorithm`
+and `std.threading` do not carry `parallelize` on this toolchain
+(`MOJO_NOTES.md` section 4), and the `max` package is now a dependency alongside
+the pinned Mojo nightly. Before this change the same two passes existed, but the
+per-chunk work was driven from Python by a `ThreadPoolExecutor` calling back into
+Mojo once per chunk.
+
+Output is unchanged: an escape never spans a byte, and each chunk owns its output
+range, so any worker count produces the same bytes as the serial writer.
+`tests/test_kernels.py::test_parallel_escape_matches_serial_for_every_worker_count`
+compares serial output with the chunked output at 1, 2, 4 and 8 workers on the
+same input, byte for byte.
+
+### Where threads win
+
+Measured on 2026-11-10 on an Intel Xeon E5-2697 v4 at 2.30 GHz (Linux x86-64,
+load average 16-28 during the runs, shared host), best of 25 repetitions timed
+inside Mojo with `perf_counter_ns`, so the numbers cover `_chunk_offsets` plus
+`_chunk_write` and exclude the Python wrapper around them. Input is
+`5 < 6 & "quoted" > 0; café. ` repeated; the chunk size is 1 MiB.
+`w1` is the same code with the serial loop, so `w1` versus `wN` is the effect of
+threads alone. Reproduce with `pixi run python bench/parallel_crossover.py`.
+
+| Input | w1 | w2 | w4 | w8 |
+|---|---:|---:|---:|---:|
+| 1 MiB | 1.92 ms | 21.93 ms | 22.08 ms | 20.48 ms |
+| 2 MiB | 3.73 ms | 13.01 ms | 21.90 ms | 10.77 ms |
+| 4 MiB | 7.84 ms | 15.37 ms | 11.93 ms | 10.18 ms |
+| 6 MiB | 11.54 ms | 16.44 ms | 12.43 ms | 10.65 ms |
+| 8 MiB | 15.66 ms | 19.12 ms | 14.48 ms | 13.04 ms |
+| 10 MiB | 19.64 ms | 21.44 ms | 14.84 ms | 13.29 ms |
+| 12 MiB | 23.55 ms | 24.58 ms | 17.21 ms | 14.33 ms |
+| 16 MiB | 31.54 ms | 29.06 ms | 19.27 ms | 15.88 ms |
+| 32 MiB | 63.46 ms | 45.40 ms | 29.95 ms | 22.50 ms |
+
+The crossover sits between 8 and 10 MiB for four workers (1.08x at 8 MiB, which
+is inside run-to-run noise, then 1.32x at 10 MiB). The threshold is therefore
+12 MiB: above the whole crossover band, with margin. Below it, callers run the
+serial loop and never spawn a worker.
+
+Two effects set that crossover. A `parallelize` call from a ctypes/Python host
+costs about 4-5 ms on this shared machine even when the callback does nothing,
+which is larger than the whole serial escape of a 4 MiB buffer; and the work
+itself is memory-bound, so it does not scale linearly.
+
+Worker count: the rule of thumb is 4. It was raised to 8 because the benchmark
+shows it helps: 8 workers beat 4 at every size from 6 MiB up (8 MiB 13.04 against
+14.48 ms, 16 MiB 15.88 against 19.27 ms, 32 MiB 22.50 against 29.95 ms), while
+2 workers are worse than 4 everywhere and worse than serial below 16 MiB. The
+gain flattens after 8: worker count cannot exceed the chunk count, and at the
+12 MiB threshold there are only 12 chunks to hand out.
+
+### Before and after
+
+Same host, same buffers, both libraries in one process, best of 11. `HEAD` is the
+previous commit built from source to a separate shared library; `now` is this
+change. `threaded` is the chunked path with the shipped worker settings (HEAD:
+8 Python threads, 4 MiB threshold; now: 8 Mojo workers, 12 MiB threshold).
+
+| Input | HEAD serial | now serial | HEAD threaded | now threaded |
+|---|---:|---:|---:|---:|
+| 1 MiB | 1.60 ms | 1.59 ms | 1.76 ms | 1.92 ms (serial, below threshold) |
+| 2 MiB | 3.26 ms | 3.28 ms | 3.54 ms | 3.73 ms (serial, below threshold) |
+| 4 MiB | 6.39 ms | 6.41 ms | 7.17 ms | 7.84 ms (serial, below threshold) |
+| 8 MiB | 13.72 ms | 13.34 ms | 14.97 ms | 15.66 ms (serial, below threshold) |
+| 12 MiB | 20.47 ms | 20.93 ms | 22.61 ms | 17.27 ms |
+| 16 MiB | 32.74 ms | 28.07 ms | 30.58 ms | 18.34 ms |
+
+The serial path is unchanged, which is what the equal serial columns show. The
+previous threaded path was slower than serial at 1-8 MiB even though its 4 MiB
+threshold enabled it there: that is the failure mode this change removes, by
+letting the serial loop cover everything below 12 MiB. Where the work is large
+enough to pay for workers, the Mojo path is about 1.3x faster than the previous
+threaded path at 12 MiB (17.27 against 22.61 ms) and about 1.7x at 16 MiB
+(18.34 against 30.58 ms).
+
+The end-to-end `pixi run bench` HTML escape row escapes 4.6 MB, which is below the
+threshold, so it measures the serial path: 24.47 ms in that run, against 21.80 ms
+in the table at the top of this file. Both rows are dominated by host noise on this
+shared machine (the parse and render rows moved by a comparable fraction between
+those runs), and this row does not exercise the parallel path at all. The factory
+benchmark lock was held by other jobs for the duration of this work, so the numbers
+here come from running the same bench body without the lock.
+
+Not adopted, after measuring:
+
+- Lowering the threshold to 4 MiB: at 4 MiB, 8 workers take 10.18 ms against
+  7.84 ms serial, a 1.3x loss; 4 workers are worse still at 11.93 ms.
+- Two workers: slower than four workers at every size, and slower than serial up
+  to 16 MiB.
+- More than 8 workers: the chunk count at and near the threshold is 12, so extra
+  workers have nothing to do.
+- Replacing the serial kernel's inlined writer with a call to `_escape_range`:
+  measured 41.39 ms against 27.67 ms at 16 MiB, so it was reverted and the serial
+  kernel is untouched.
 
 ## Development
 

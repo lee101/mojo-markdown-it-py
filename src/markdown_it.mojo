@@ -1,3 +1,5 @@
+from max.algorithm import parallelize
+from std.time import perf_counter_ns
 from std.sys import simd_width_of as simdwidthof
 
 
@@ -283,6 +285,56 @@ def mmi_escape_html_size(src_addr: Int, n: Int) abi("C") -> Int:
     return _escaped_size(src, 0, n)
 
 
+def _chunk_offsets(
+    src: BPtr, n: Int, chunk_size: Int, workers: Int, offsets: IPtr
+) -> Int:
+    """Sizing pass, then a serial prefix sum. Identical output for any worker count."""
+    var chunks = (n + chunk_size - 1) // chunk_size
+    offsets.unsafe_store(0, Int64(0))
+    if workers > 1 and chunks > 1:
+        var active = min(workers, chunks)
+
+        def size_chunk(chunk: Int) {imm}:
+            var start = chunk * chunk_size
+            var end = min(start + chunk_size, n)
+            offsets.unsafe_store(chunk + 1, Int64(_escaped_size(src, start, end)))
+
+        parallelize(size_chunk, chunks, active)
+    else:
+        for chunk in range(chunks):
+            var start = chunk * chunk_size
+            var end = min(start + chunk_size, n)
+            offsets.unsafe_store(chunk + 1, Int64(_escaped_size(src, start, end)))
+
+    var total = 0
+    for chunk in range(chunks):
+        total += Int(offsets.unsafe_load(chunk + 1))
+        offsets.unsafe_store(chunk + 1, Int64(total))
+    return total
+
+
+def _chunk_write(
+    src: BPtr, n: Int, dst: BPtr, chunk_size: Int, workers: Int, offsets: IPtr
+) -> Int:
+    """Write pass. Each chunk owns a disjoint output range, so order cannot matter."""
+    var chunks = (n + chunk_size - 1) // chunk_size
+    if workers > 1 and chunks > 1:
+        var active = min(workers, chunks)
+
+        def escape_chunk(chunk: Int) {imm}:
+            var start = chunk * chunk_size
+            var end = min(start + chunk_size, n)
+            _ = _escape_range(src, start, end, dst, Int(offsets.unsafe_load(chunk)))
+
+        parallelize(escape_chunk, chunks, active)
+    else:
+        for chunk in range(chunks):
+            var start = chunk * chunk_size
+            var end = min(start + chunk_size, n)
+            _ = _escape_range(src, start, end, dst, Int(offsets.unsafe_load(chunk)))
+    return Int(offsets.unsafe_load(chunks))
+
+
 @export("mmi_escape_html_offsets")
 def mmi_escape_html_offsets(
     src_addr: Int,
@@ -290,12 +342,14 @@ def mmi_escape_html_offsets(
     offsets_addr: Int,
     chunk_size: Int,
     offsets_capacity: Int,
+    workers: Int,
 ) abi("C") -> Int:
     if (
         src_addr == 0
         or offsets_addr == 0
         or n < 0
         or chunk_size <= 0
+        or workers < 0
     ):
         return -1
     var chunks = (n + chunk_size - 1) // chunk_size
@@ -303,18 +357,7 @@ def mmi_escape_html_offsets(
         return -1
     var src = BPtr(unsafe_from_address=src_addr)
     var offsets = IPtr(unsafe_from_address=offsets_addr)
-    offsets.unsafe_store(0, Int64(0))
-
-    for chunk in range(chunks):
-        var start = chunk * chunk_size
-        var end = min(start + chunk_size, n)
-        offsets.unsafe_store(chunk + 1, Int64(_escaped_size(src, start, end)))
-
-    var total = 0
-    for chunk in range(chunks):
-        total += Int(offsets.unsafe_load(chunk + 1))
-        offsets.unsafe_store(chunk + 1, Int64(total))
-    return total
+    return _chunk_offsets(src, n, chunk_size, workers, offsets)
 
 
 @export("mmi_escape_html_chunks")
@@ -326,6 +369,7 @@ def mmi_escape_html_chunks(
     chunk_size: Int,
     offsets_capacity: Int,
     dst_capacity: Int,
+    workers: Int,
 ) abi("C") -> Int:
     if (
         src_addr == 0
@@ -334,6 +378,7 @@ def mmi_escape_html_chunks(
         or n < 0
         or chunk_size <= 0
         or dst_capacity < 0
+        or workers < 0
     ):
         return -1
     var chunks = (n + chunk_size - 1) // chunk_size
@@ -351,18 +396,7 @@ def mmi_escape_html_chunks(
             return -1
         previous = current
 
-    for chunk in range(chunks):
-        var start = chunk * chunk_size
-        var end = min(start + chunk_size, n)
-        _ = _escape_range(
-            src,
-            start,
-            end,
-            dst,
-            Int(offsets.unsafe_load(chunk)),
-        )
-
-    return Int(offsets.unsafe_load(chunks))
+    return _chunk_write(src, n, dst, chunk_size, workers, offsets)
 
 
 @export("mmi_escape_html_write")
@@ -470,3 +504,53 @@ def mmi_escape_html(
     if needed > dst_capacity:
         return -1
     return _escape_range(src, 0, n, dst, 0)
+
+
+@export("mmi_escape_html_chunks_timed")
+def mmi_escape_html_chunks_timed(
+    src_addr: Int,
+    n: Int,
+    dst_addr: Int,
+    offsets_addr: Int,
+    chunk_size: Int,
+    offsets_capacity: Int,
+    dst_capacity: Int,
+    workers: Int,
+    reps: Int,
+) abi("C") -> Int:
+    """Benchmark-only entry point: best-of-`reps` microseconds for one chunked escape.
+
+    `mmi_escape_html_offsets` is measured through `_chunk_offsets`, and
+    `mmi_escape_html_chunks` through `_chunk_write`, so the timed work is the same
+    code path the library ships. The caller still supplies both buffers.
+    """
+    if (
+        src_addr == 0
+        or dst_addr == 0
+        or offsets_addr == 0
+        or n < 0
+        or chunk_size <= 0
+        or offsets_capacity <= 0
+        or dst_capacity < 0
+        or workers < 0
+        or reps <= 0
+    ):
+        return -1
+    var chunks = (n + chunk_size - 1) // chunk_size
+    if offsets_capacity < chunks + 1:
+        return -1
+    var src = BPtr(unsafe_from_address=src_addr)
+    var dst = BPtr(unsafe_from_address=dst_addr)
+    var offsets = IPtr(unsafe_from_address=offsets_addr)
+    var total = _chunk_offsets(src, n, chunk_size, workers, offsets)
+    if total > dst_capacity:
+        return -1
+    var best: Int = 1 << 62
+    for rep in range(reps):
+        var t0 = perf_counter_ns()
+        _ = _chunk_offsets(src, n, chunk_size, workers, offsets)
+        _ = _chunk_write(src, n, dst, chunk_size, workers, offsets)
+        var t1 = perf_counter_ns()
+        if t1 - t0 < best:
+            best = t1 - t0
+    return Int(best // 1000)
