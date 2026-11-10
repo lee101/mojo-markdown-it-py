@@ -68,9 +68,12 @@ class RendererHTML:
 
     @staticmethod
     def renderAttrs(token: Token) -> str:
+        attrs = token.attrs
+        if not attrs:
+            return ""
         return "".join(
             f' {escape_html(str(key))}="{escape_html(str(value))}"'
-            for key, value in token.attrItems()
+            for key, value in attrs.items()
         )
 
     def renderInlineAsText(self, tokens, options, env) -> str:
